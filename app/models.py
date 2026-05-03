@@ -1,8 +1,8 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
 from sqlalchemy.sql import func
-from .database import Base
+from .database import engine, Base
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, ForeignKey, Text
-from .database import Base
+
 
 
 class User(Base):
@@ -35,4 +35,6 @@ class Task(Base):
     worker_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+Base.metadata.create_all(bind=engine)
 

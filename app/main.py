@@ -8,7 +8,7 @@ import uuid
 
 # Import your own files
 from .database import engine, get_db, Base
-from .models import User
+from .models import User, Task
 from .auth import hash_password, verify_password, create_access_token
 from pydantic import BaseModel
 
@@ -17,7 +17,7 @@ from jose import jwt
 from fastapi.security import OAuth2PasswordBearer
 
 # Create the tables if they don't exist
-Base.metadata.create_all(bind=engine)
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 app = FastAPI(title="SafeStay API")
@@ -127,39 +127,57 @@ async def login(data: LoginRequest, db: Session = Depends(get_db)):
 
 # Add this endpoint to your main.py
 # 1. Client creates a request
+class TaskCreate(BaseModel):
+    title: str
+    description: str
+    location: str
+
 @app.post("/tasks/create")
 async def create_task(
-    title: str = Form(...),
-    description: str = Form(...),
-    location: str = Form(...),
+    task: TaskCreate,
     db: Session = Depends(get_db),
-    token: str = Depends(oauth2_scheme) # Protects the route
+    token: str = Depends(oauth2_scheme)
 ):
-    # 1. Identify who is logged in
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        user = db.query(User).filter(User.email == email).first()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # 2. Create the Task in MSSQL
-        new_task = Task(
-            title=title,
-            description=description,
-            location=location,
-            client_id=user.id, # Link it to the logged-in client
-            status="PENDING"
-        )
-        
-        db.add(new_task)
-        db.commit()
-        return {"message": "Task created successfully", "task_id": new_task.id}
-        
-    except Exception as e:
-        print(f"Error creating task: {e}")
-        raise HTTPException(status_code=401, detail="Session expired or invalid")
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    email: str = payload.get("sub")
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_task = Task(
+        title=task.title,
+        description=task.description,
+        location=task.location,
+        client_id=user.id,
+        status="PENDING"
+    )
+    db.add(new_task)
+    db.commit()
+    db.refresh(new_task)
+
+    return {"message": "Task created successfully", "task_id": new_task.id}
+    
+
+@app.get("/client/my-tasks")
+async def get_client_tasks(
+    db: Session = Depends(get_db), 
+    token: str = Depends(oauth2_scheme)
+):
+    # 1. Identify the user from the token
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    email: str = payload.get("sub")
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # 2. Fetch tasks created by this specific client
+    # We order by created_at desc so the newest request appears at the top
+    tasks = db.query(Task).filter(Task.client_id == user.id).order_by(Task.created_at.desc()).all()
+    
+    return tasks
+
 
 # 2. Worker sees available tasks in their area
 @app.get("/tasks/available")
@@ -172,15 +190,42 @@ async def get_worker_tasks(worker_id: int, db: Session = Depends(get_db)):
     tasks = db.query(Task).filter(Task.worker_id == worker_id).all()
     return tasks
 
-@app.put("/worker/update-task")
-async def update_task(task_id: int, is_completed: bool, db: Session = Depends(get_db)):
+# @app.put("/worker/update-task/{task_id}")
+# async def update_task_status(
+#     task_id: int, 
+#     status: str, # Send "COMPLETED" or "ACCEPTED"
+#     db: Session = Depends(get_db)
+# ):
+#     task = db.query(Task).filter(Task.id == task_id).first()
+#     if not task:
+#         raise HTTPException(status_code=404, detail="Task not found")
+    
+#     task.status = status # Using the 'status' column we defined in the Task model
+#     db.commit()
+#     return {"status": "success", "message": f"Task updated to {status}"}
+
+@app.put("/worker/accept-task/{task_id}")
+async def accept_task(
+    task_id: int, 
+    db: Session = Depends(get_db), 
+    token: str = Depends(oauth2_scheme)
+):
+    # 1. Get current worker from token
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    email = payload.get("sub")
+    worker = db.query(User).filter(User.email == email).first()
+
+    # 2. Find the task
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    task.is_completed = is_completed
+    # 3. Update Task with Worker's ID and change status
+    task.worker_id = worker.id
+    task.status = "ACCEPTED"
+    
     db.commit()
-    return {"status": "success", "message": "Task updated"}
+    return {"message": "You have successfully accepted this task"}
 
 
 @app.get("/auth/me")
