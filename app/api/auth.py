@@ -56,7 +56,6 @@ async def signup(
         id_proof_path=id_path,
         profile_pic_path=profile_path
     )
-
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
